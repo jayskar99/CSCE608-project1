@@ -15,7 +15,6 @@ NUM_PUBLISHERS = 50
 def generate_csv(filename, fieldnames, data):
     with open('Data/' + filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
         writer.writerows(data)
 
 # 1. Generate Publishers

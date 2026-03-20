@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Library Member Portal</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: #f0f2f5; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+        .card { padding: 20px; border: 1px solid #ddd; border-radius: 8px; background: #fff; }
+        input, button, select { padding: 10px; margin: 5px 0; border-radius: 4px; border: 1px solid #ccc; }
+        button { cursor: pointer; background: #007bff; color: white; border: none; }
+        button:hover { background: #0056b3; }
+        .btn-return { background: #28a745; font-size: 0.8em; padding: 5px 10px; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 10px 0; border-bottom: 1px solid #eee; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="login-section" style="text-align: center; padding: 50px 0;">
+            <h1>Library Member Portal</h1>
+            <input type="number" id="cardInput" placeholder="Card Number">
+            <button onclick="login()">Login</button>
+            <div id="login-error" style="color: red; margin-top: 10px;"></div>
+            <div class="card" style="margin-top: 30px; background: #222; color: #0f0; text-align: left;">
+                <h3>LocalDB SQL Console</h3>
+                <div style="display: flex; gap: 10px;">
+                    <input type="text" id="adminQuery" placeholder="SELECT * FROM HISTORY" style="flex: 3; background: #000; color: #0f0;">
+                    <button onclick="runAdminQuery()" style="background: #0f0; color: #000; font-weight: bold;">Execute</button>
+                </div>
+                <div id="admin-output" style="margin-top: 15px; overflow-x: auto; font-family: monospace; font-size: 0.8em;"></div>
+            </div>
+        </div>
+
+        <div id="app-section" style="display: none;">
+            <header>
+                <h2 id="welcome-msg">Welcome</h2>
+                <button onclick="logout()" style="background:#6c757d">Logout</button>
+            </header>
+            <div class="grid">
+                <div class="card">
+                    <h3>Find a Book</h3>
+                    <div style="display: flex; gap: 5px; margin-bottom: 10px;">
+                        <input type="text" id="searchInput" placeholder="Search title..." style="flex: 2;">
+                        <select id="genreSelect" style="flex: 1;"><option value="">All Genres</option></select>
+                    </div>
+                    <button onclick="searchBooks()" style="width: 100%;">Search</button>
+                    <div id="book-results" style="margin-top: 15px; max-height: 250px; overflow-y: auto;"></div>
+                    <h3>My Reservations</h3>
+                    <div id="my-reservations"></div>
+                </div>
+                <div class="card" style="background: #f9f9f9;">
+                    <h3>Account Summary</h3>
+                    <p><strong>Unpaid Fees:</strong> <span id="fee-total" style="color: red;">$0.00</span></p>
+                    <hr>
+                    <h4>Currently Checked Out</h4>
+                    <div id="my-history"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let db;
+        let currentUserCard = null;
+
+        const persist = () => localStorage.setItem("library_db_save", JSON.stringify(Array.from(db.export())));
+
+        async function initDatabase() {
+            const sqlPromise = initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/${file}` });
+            const savedDb = localStorage.getItem("library_db_save");
+            const dataPromise = savedDb ? Promise.resolve(new Uint8Array(JSON.parse(savedDb))) : fetch("library.db").then(res => res.arrayBuffer()).then(buf => new Uint8Array(buf));
+            const [SQL, uint8Array] = await Promise.all([sqlPromise, dataPromise]);
+            db = new SQL.Database(uint8Array);
+            const sessionCard = sessionStorage.getItem("activeCard");
+            if (sessionCard) { document.getElementById('cardInput').value = sessionCard; login(); }
+        }
+
+        function login() {
+            const cardNum = document.getElementById('cardInput').value;
+            const res = db.exec(`SELECT first_name, last_name FROM PERSON WHERE card_number = ${cardNum}`);
+            if (res.length > 0) {
+                persist();
+                currentUserCard = cardNum;
+                sessionStorage.setItem("activeCard", cardNum);
+                document.getElementById('login-section').style.display = 'none';
+                document.getElementById('app-section').style.display = 'block';
+                document.getElementById('welcome-msg').innerText = `Welcome, ${res[0].values[0][0]} ${res[0].values[0][1]}`;
+                populateGenres(); refreshAccountData();
+            } else { document.getElementById('login-error').innerText = "Card number not found."; }
+        }
+
+        function populateGenres() {
+            const res = db.exec("SELECT DISTINCT genre FROM BOOK WHERE genre IS NOT NULL AND genre != '' ORDER BY genre ASC");
+            const select = document.getElementById('genreSelect');
+            select.innerHTML = '<option value="">All Genres</option>';
+            if (res[0]) res[0].values.forEach(row => {
+                const opt = document.createElement('option');
+                opt.value = opt.innerHTML = row[0];
+                select.appendChild(opt);
+            });
+        }
+
+        function logout() { persist(); sessionStorage.removeItem("activeCard"); location.reload(); }
+
+        function searchBooks() {
+            const term = document.getElementById('searchInput').value;
+            const genre = document.getElementById('genreSelect').value;
+            let sql = `SELECT isbn, title, author, genre FROM BOOK WHERE (title LIKE '%${term}%' OR author LIKE '%${term}%') 
+                       AND isbn NOT IN (SELECT isbn FROM HISTORY WHERE return_date IS NULL OR return_date = '') 
+                       AND isbn NOT IN (SELECT isbn FROM RESERVATION)`;
+            if (genre) sql += ` AND genre = '${genre}'`;
+            const res = db.exec(sql + " LIMIT 15");
+            let html = "<ul>";
+            if (res[0]) res[0].values.forEach(row => {
+                html += `<li><strong>${row[1]}</strong> (${row[3]})<br>${row[2]}<br>
+                         <button onclick="checkoutBook('${row[0]}')">Checkout</button>
+                         <button onclick="reserveBook('${row[0]}')" style="background:#6c757d">Reserve</button></li>`;
+            }); else html += "<li>No available books found.</li>";
+            document.getElementById('book-results').innerHTML = html + "</ul>";
+        }
+
+        function checkoutBook(isbn, reservationId = null) {
+            if (!reservationId && db.exec(`SELECT isbn FROM HISTORY WHERE isbn='${isbn}' AND (return_date IS NULL OR return_date='') UNION SELECT isbn FROM RESERVATION WHERE isbn='${isbn}'`).length > 0) return alert("Unavailable");
+            const today = new Date().toISOString().split('T')[0];
+            const dueStr = new Date(Date.now() + 12096e5).toISOString().split('T')[0];
+            try {
+                db.run("BEGIN TRANSACTION;");
+                db.run(`INSERT INTO HISTORY (id, checkout_dt, due_date, isbn, card_number) VALUES (${Math.random()*1e6|0}, '${today}', '${dueStr}', '${isbn}', ${currentUserCard})`);
+                if (reservationId) db.run(`DELETE FROM RESERVATION WHERE id = ${reservationId}`);
+                db.run("COMMIT;");
+                persist(); refreshAccountData(); searchBooks();
+            } catch (e) { db.run("ROLLBACK;"); alert(e.message); }
+        }
+
+        function returnBook(historyId) {
+            db.run(`UPDATE HISTORY SET return_date = '${new Date().toISOString().split('T')[0]}' WHERE id = ${historyId}`);
+            persist(); refreshAccountData(); searchBooks();
+        }
+
+        function reserveBook(isbn) {
+            const endStr = new Date(Date.now() + 6048e5).toISOString().split('T')[0];
+            db.run(`INSERT INTO RESERVATION (id, end_date, status, isbn, card_number) VALUES (${Math.random()*1e6|0}, '${endStr}', 'Active', '${isbn}', ${currentUserCard})`);
+            persist(); refreshAccountData(); searchBooks();
+        }
+
+        function refreshAccountData() {
+            const fee = db.exec(`SELECT SUM(PR.dollar_amount) FROM FEE F JOIN PRICE PR ON F.price_id = PR.id WHERE F.card_number = ${currentUserCard} AND F.status = 'Unpaid'`);
+            document.getElementById('fee-total').innerText = `$${parseFloat((fee[0] && fee[0].values[0][0]) || 0).toFixed(2)}`;
+            const hist = db.exec(`SELECT B.title, H.due_date, H.id FROM HISTORY H JOIN BOOK B ON H.isbn = B.isbn WHERE H.card_number = ${currentUserCard} AND (H.return_date IS NULL OR H.return_date = '')`);
+            let hHtml = "<ul>";
+            if (hist[0]) hist[0].values.forEach(row => hHtml += `<li><strong>${row[0]}</strong><br><small>Due: ${row[1]}</small> <button class="btn-return" onclick="returnBook(${row[2]})">Return</button></li>`);
+            document.getElementById('my-history').innerHTML = hHtml + "</ul>";
+            const resv = db.exec(`SELECT B.title, R.end_date, R.id, R.isbn FROM RESERVATION R JOIN BOOK B ON R.isbn = B.isbn WHERE R.card_number = ${currentUserCard}`);
+            let rHtml = "<ul>";
+            if (resv[0]) resv[0].values.forEach(row => rHtml += `<li><strong>${row[0]}</strong><br><small>Expires: ${row[1]}</small><br><button onclick="checkoutBook('${row[3]}', ${row[2]})" style="background:#28a745;font-size:0.8em;">Check Out Now</button></li>`);
+            document.getElementById('my-reservations').innerHTML = rHtml + "</ul>";
+        }
+
+        function runAdminQuery() {
+            try {
+                const res = db.exec(document.getElementById('adminQuery').value);
+                if (!res[0]) return document.getElementById('admin-output').innerHTML = "Success (No rows).";
+                let h = "<table border='1' style='border-collapse:collapse;width:100%'><tr>" + res[0].columns.map(c=>`<th>${c}</th>`).join("") + "</tr>";
+                res[0].values.forEach(r => h += "<tr>" + r.map(v=>`<td>${v??'NULL'}</td>`).join("") + "</tr>");
+                document.getElementById('admin-output').innerHTML = h + "</table>";
+            } catch (e) { document.getElementById('admin-output').innerHTML = e.message; }
+        }
+        initDatabase();
+    </script>
+</body>
+</html>
